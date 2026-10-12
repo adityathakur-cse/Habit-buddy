@@ -29,7 +29,17 @@ const registerUser = async (req, res) => {
     });
   } catch (error) {
     console.error('Registration Error:', error.message);
-    res.status(500).json({ error: 'Server error during registration' });
+    let errorMessage = 'Server error during registration';
+    if (error.code === '28P01') {
+      errorMessage = 'Database authentication failed: incorrect PostgreSQL password in server/.env';
+    } else if (error.code === '3D000') {
+      errorMessage = 'Database "habitbuddy" does not exist in PostgreSQL. Please run CREATE DATABASE habitbuddy;';
+    } else if (error.code === '42P01') {
+      errorMessage = 'Table "users" does not exist. Please run schema.sql in your database.';
+    } else if (error.code === 'ECONNREFUSED') {
+      errorMessage = 'PostgreSQL is not running or not reachable on port 5432.';
+    }
+    res.status(500).json({ error: errorMessage });
   }
 };
 
@@ -69,7 +79,17 @@ const loginUser = async (req, res) => {
     });
   } catch (error) {
     console.error('Login Error:', error.message);
-    res.status(500).json({ error: 'Server error during login' });
+    let errorMessage = 'Server error during login';
+    if (error.code === '28P01') {
+      errorMessage = 'Database authentication failed: incorrect PostgreSQL password in server/.env';
+    } else if (error.code === '3D000') {
+      errorMessage = 'Database "habitbuddy" does not exist in PostgreSQL. Please run CREATE DATABASE habitbuddy;';
+    } else if (error.code === '42P01') {
+      errorMessage = 'Table "users" does not exist. Please run schema.sql in your database.';
+    } else if (error.code === 'ECONNREFUSED') {
+      errorMessage = 'PostgreSQL is not running or not reachable on port 5432.';
+    }
+    res.status(500).json({ error: errorMessage });
   }
 };
 
