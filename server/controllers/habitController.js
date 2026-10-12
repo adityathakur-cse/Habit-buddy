@@ -106,7 +106,7 @@ const toggleHabit = async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const logDate = req.body.date || new Date().toISOString().split('T')[0];
+    const logDate = req.body.date || new Date().toLocaleDateString('en-CA');
 
     // Check if habit belongs to user
     const habitCheck = await db.query('SELECT id FROM habits WHERE id = $1 AND user_id = $2', [id, userId]);
@@ -116,7 +116,7 @@ const toggleHabit = async (req, res) => {
 
     // Check existing log for this day
     const existingLog = await db.query(
-      'SELECT id, status FROM daily_logs WHERE habit_id = $1 AND log_date = $2',
+      'SELECT id, status FROM daily_logs WHERE habit_id = $1 AND log_date = $2::DATE',
       [id, logDate]
     );
 
@@ -131,7 +131,7 @@ const toggleHabit = async (req, res) => {
       }
     } else {
       await db.query(
-        'INSERT INTO daily_logs (habit_id, user_id, log_date, status) VALUES ($1, $2, $3, $4)',
+        'INSERT INTO daily_logs (habit_id, user_id, log_date, status) VALUES ($1, $2, $3::DATE, $4)',
         [id, userId, logDate, 'completed']
       );
       return res.json({ completed: true, message: 'Habit marked as completed' });
@@ -142,30 +142,112 @@ const toggleHabit = async (req, res) => {
   }
 };
 
-// Get consistency board data (heatmap logs over last 120 days)
+// Quick date check-in / calendar toggle (works even with 0 pre-created habits)
+const quickCheckIn = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const targetDate = req.body.date || new Date().toLocaleDateString('en-CA');
+
+    let habit = await db.query('SELECT id FROM habits WHERE user_id = $1 LIMIT 1', [userId]);
+    let habitId;
+    if (habit.rows.length === 0) {
+      const newHabit = await db.query(
+        'INSERT INTO habits (user_id, title, description, category) VALUES ($1, $2, $3, $4) RETURNING id',
+        [userId, 'Daily Consistency', 'Daily consistency check-in', 'General']
+      );
+      habitId = newHabit.rows[0].id;
+    } else {
+      habitId = habit.rows[0].id;
+    }
+
+    const existing = await db.query(
+      'SELECT id, status FROM daily_logs WHERE user_id = $1 AND log_date = $2::DATE',
+      [userId, targetDate]
+    );
+
+    if (existing.rows.length > 0) {
+      await db.query('DELETE FROM daily_logs WHERE user_id = $1 AND log_date = $2::DATE', [userId, targetDate]);
+      return res.json({ completed: false, message: 'Unmarked for ' + targetDate });
+    } else {
+      await db.query(
+        'INSERT INTO daily_logs (habit_id, user_id, log_date, status) VALUES ($1, $2, $3::DATE, $4)',
+        [habitId, userId, targetDate, 'completed']
+      );
+      return res.json({ completed: true, message: 'Marked consistent for ' + targetDate });
+    }
+  } catch (error) {
+    console.error('Quick Checkin Error:', error.message);
+    res.status(500).json({ error: 'Server error while checking in' });
+  }
+};
+
+// Get consistency board data (heatmap logs over last 150 days)
 const getConsistencyBoard = async (req, res) => {
   try {
     const userId = req.user.id;
+    const clientDate = req.query.date || new Date().toLocaleDateString('en-CA');
+
     const logs = await db.query(
-      `SELECT log_date::TEXT, COUNT(*) as count 
+      `SELECT TO_CHAR(log_date, 'YYYY-MM-DD') as log_date, COUNT(*) as count 
        FROM daily_logs 
-       WHERE user_id = $1 AND status = 'completed' AND log_date >= CURRENT_DATE - INTERVAL '120 days'
+       WHERE user_id = $1 AND status = 'completed' AND log_date >= ($2::DATE - INTERVAL '150 days')
        GROUP BY log_date 
        ORDER BY log_date ASC`,
-      [userId]
+      [userId, clientDate]
     );
 
     // Also get today's completed habit IDs
     const todayLogs = await db.query(
-      `SELECT habit_id FROM daily_logs WHERE user_id = $1 AND log_date = CURRENT_DATE AND status = 'completed'`,
-      [userId]
+      `SELECT habit_id FROM daily_logs 
+       WHERE user_id = $1 AND log_date = $2::DATE AND status = 'completed'`,
+      [userId, clientDate]
     );
 
     const completedHabitIds = todayLogs.rows.map(r => r.habit_id);
 
+    // Calculate current streak
+    const distinctDatesResult = await db.query(
+      `SELECT DISTINCT TO_CHAR(log_date, 'YYYY-MM-DD') as log_date
+       FROM daily_logs
+       WHERE user_id = $1 AND status = 'completed'
+       ORDER BY log_date DESC`,
+      [userId]
+    );
+
+    const dates = distinctDatesResult.rows.map(r => r.log_date);
+    let streak = 0;
+    const checkDate = new Date(clientDate);
+    const todayStr = clientDate;
+
+    const yesterdayDate = new Date(checkDate);
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterdayStr = yesterdayDate.toLocaleDateString('en-CA');
+
+    let startDate = null;
+    if (dates.includes(todayStr)) {
+      startDate = new Date(checkDate);
+    } else if (dates.includes(yesterdayStr)) {
+      startDate = new Date(yesterdayDate);
+    }
+
+    if (startDate) {
+      let curr = new Date(startDate);
+      while (true) {
+        const currStr = curr.toLocaleDateString('en-CA');
+        if (dates.includes(currStr)) {
+          streak++;
+          curr.setDate(curr.getDate() - 1);
+        } else {
+          break;
+        }
+      }
+    }
+
     res.json({
       heatmap: logs.rows,
-      todayCompleted: completedHabitIds
+      todayCompleted: completedHabitIds,
+      currentStreak: streak,
+      totalCompletions: dates.length,
     });
   } catch (error) {
     console.error('Get Consistency Board Error:', error.message);
@@ -179,5 +261,6 @@ module.exports = {
   updateHabit,
   deleteHabit,
   toggleHabit,
+  quickCheckIn,
   getConsistencyBoard,
 };

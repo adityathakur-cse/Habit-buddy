@@ -10,10 +10,12 @@ export default function Dashboard() {
   const [habits, setHabits] = useState([]);
   const [heatmapData, setHeatmapData] = useState([]);
   const [todayCompleted, setTodayCompleted] = useState([]);
+  const [currentStreak, setCurrentStreak] = useState(0);
   const [focusedHours, setFocusedHours] = useState(0);
   const [focusInput, setFocusInput] = useState('');
   const [focusGoal] = useState(2.0);
   const [loading, setLoading] = useState(true);
+  const [toastMessage, setToastMessage] = useState('');
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -22,6 +24,16 @@ export default function Dashboard() {
   const [newCategory, setNewCategory] = useState('Productivity');
   const [newReminder, setNewReminder] = useState('08:00');
   const [modalLoading, setModalLoading] = useState(false);
+
+  // Helper for timezone-safe local YYYY-MM-DD
+  const getLocalDate = (d = new Date()) => {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const todayStr = useMemo(() => getLocalDate(new Date()), []);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -45,22 +57,24 @@ export default function Dashboard() {
     try {
       const headers = { Authorization: `Bearer ${token}` };
 
-      // Fetch habits
+      // 1. Fetch habits
       const habitsRes = await fetch('http://localhost:5000/api/habits', { headers });
       if (habitsRes.ok) {
         const data = await habitsRes.json();
         setHabits(data);
       }
 
-      // Fetch consistency board
-      const boardRes = await fetch('http://localhost:5000/api/habits/board', { headers });
+      // 2. Fetch consistency board with local date query
+      const localToday = getLocalDate();
+      const boardRes = await fetch(`http://localhost:5000/api/habits/board?date=${localToday}`, { headers });
       if (boardRes.ok) {
         const data = await boardRes.json();
         setHeatmapData(data.heatmap || []);
         setTodayCompleted(data.todayCompleted || []);
+        setCurrentStreak(data.currentStreak || 0);
       }
 
-      // Fetch focus stats
+      // 3. Fetch focus stats
       const focusRes = await fetch('http://localhost:5000/api/sessions/today', { headers });
       if (focusRes.ok) {
         const data = await focusRes.json();
@@ -76,6 +90,7 @@ export default function Dashboard() {
   // Toggle habit check-in for today
   const handleToggleHabit = async (habitId) => {
     const token = localStorage.getItem('token');
+    const localToday = getLocalDate();
     try {
       const res = await fetch(`http://localhost:5000/api/habits/${habitId}/toggle`, {
         method: 'POST',
@@ -83,27 +98,75 @@ export default function Dashboard() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
+        body: JSON.stringify({ date: localToday }),
       });
 
       if (res.ok) {
         const data = await res.json();
         if (data.completed) {
           setTodayCompleted((prev) => [...prev, habitId]);
+          showToast('✅ Habit completed! Consistency updated.');
         } else {
           setTodayCompleted((prev) => prev.filter((id) => id !== habitId));
+          showToast('Unmarked habit.');
         }
+
         // Refresh board
-        const boardRes = await fetch('http://localhost:5000/api/habits/board', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (boardRes.ok) {
-          const bData = await boardRes.json();
-          setHeatmapData(bData.heatmap || []);
-        }
+        refreshBoard(token);
       }
     } catch (err) {
       console.error('Failed to toggle habit:', err);
     }
+  };
+
+  // Direct date check-in (clicking any box or "+ Calendar")
+  const handleDirectCheckIn = async (targetDate) => {
+    const token = localStorage.getItem('token');
+    try {
+      const res = await fetch('http://localhost:5000/api/habits/checkin', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ date: targetDate }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        showToast(data.message || 'Consistency updated!');
+        refreshBoard(token);
+
+        // Also refresh habits if one was auto-created
+        const habitsRes = await fetch('http://localhost:5000/api/habits', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (habitsRes.ok) {
+          const hData = await habitsRes.json();
+          setHabits(hData);
+        }
+      }
+    } catch (err) {
+      console.error('Failed direct check-in:', err);
+    }
+  };
+
+  const refreshBoard = async (token) => {
+    const localToday = getLocalDate();
+    const boardRes = await fetch(`http://localhost:5000/api/habits/board?date=${localToday}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (boardRes.ok) {
+      const bData = await boardRes.json();
+      setHeatmapData(bData.heatmap || []);
+      setTodayCompleted(bData.todayCompleted || []);
+      setCurrentStreak(bData.currentStreak || 0);
+    }
+  };
+
+  const showToast = (msg) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(''), 3000);
   };
 
   // Save Focused Hours manually
@@ -126,6 +189,7 @@ export default function Dashboard() {
       if (res.ok) {
         setFocusedHours((prev) => parseFloat((prev + hours).toFixed(1)));
         setFocusInput('');
+        showToast(`Logged ${hours} focused hours!`);
       }
     } catch (err) {
       console.error('Failed to save focus hours:', err);
@@ -160,6 +224,7 @@ export default function Dashboard() {
         setIsModalOpen(false);
         setNewTitle('');
         setNewDesc('');
+        showToast('Habit added successfully!');
       }
     } catch (err) {
       console.error('Failed to create habit:', err);
@@ -168,43 +233,67 @@ export default function Dashboard() {
     }
   };
 
-  // Generate GitHub-style 16-week Consistency Board Heatmap
-  const heatmapGrid = useMemo(() => {
+  // Build Weekday Consistency Board Heatmap matching Image 1
+  // Row order: Wed (3), Thu (4), Fri (5), Sat (6), Sun (0), Mon (1), Tue (2)
+  const weekdayRows = [
+    { label: 'Wed', dayIndex: 3 },
+    { label: 'Thu', dayIndex: 4 },
+    { label: 'Fri', dayIndex: 5 },
+    { label: 'Sat', dayIndex: 6 },
+    { label: 'Sun', dayIndex: 0 },
+    { label: 'Mon', dayIndex: 1 },
+    { label: 'Tue', dayIndex: 2 },
+  ];
+
+  const columnsCount = 28; // 28 weeks of columns
+
+  const heatmapMatrix = useMemo(() => {
     const daysMap = {};
     heatmapData.forEach((item) => {
-      // item.log_date format YYYY-MM-DD
       const dateKey = item.log_date.substring(0, 10);
       daysMap[dateKey] = parseInt(item.count, 10);
     });
 
-    // 16 weeks = 112 days
-    const totalDays = 112;
-    const gridDays = [];
     const today = new Date();
+    // Align so current week ends on today's week
+    // We construct 28 columns x 7 rows
+    const matrix = weekdayRows.map(() => []);
 
-    for (let i = totalDays - 1; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(today.getDate() - i);
-      const dateString = d.toISOString().split('T')[0];
-      const dayOfWeek = d.getDay(); // 0 is Sun, 1 is Mon, etc.
-      const count = daysMap[dateString] || 0;
+    // Calculate dates for past columnsCount weeks
+    const todayDay = today.getDay(); // 0 is Sun, 1 is Mon, etc.
+    // Offset from current day to current week's Tuesday (last row)
+    const dayOffsets = { 3: 0, 4: 1, 5: 2, 6: 3, 0: 4, 1: 5, 2: 6 };
+    const currentWeekRowIndex = dayOffsets[todayDay] !== undefined ? dayOffsets[todayDay] : 0;
 
-      gridDays.push({
-        date: dateString,
-        dayOfWeek,
-        count,
+    for (let col = columnsCount - 1; col >= 0; col--) {
+      weekdayRows.forEach((row, rIdx) => {
+        const daysAgo = col * 7 + (currentWeekRowIndex - rIdx);
+        const cellDate = new Date();
+        cellDate.setDate(today.getDate() - daysAgo);
+
+        const dateStr = getLocalDate(cellDate);
+        const isFuture = cellDate > today;
+        const count = daysMap[dateStr] || 0;
+
+        matrix[rIdx].push({
+          date: dateStr,
+          count,
+          isFuture,
+          isToday: dateStr === todayStr,
+        });
       });
     }
 
-    return gridDays;
-  }, [heatmapData]);
+    return matrix;
+  }, [heatmapData, todayStr]);
 
-  const getColorClass = (count) => {
-    if (count === 0) return 'bg-[#1e1e24] border-white/5';
-    if (count === 1) return 'bg-emerald-900 border-emerald-700/50';
-    if (count === 2) return 'bg-emerald-700 border-emerald-500/50';
-    if (count >= 3) return 'bg-emerald-500 border-emerald-400 shadow-sm shadow-emerald-500/50';
-    return 'bg-[#1e1e24]';
+  const getColorClass = (count, isFuture, isToday) => {
+    if (isFuture) return 'bg-[#16161b] opacity-40 border-transparent cursor-default';
+    if (count === 0) return isToday ? 'bg-[#22222b] border-emerald-500/60' : 'bg-[#1a1a20] border-white/5 hover:border-emerald-500/40';
+    if (count === 1) return 'bg-emerald-900 border-emerald-700/60';
+    if (count === 2) return 'bg-emerald-700 border-emerald-500/60';
+    if (count === 3) return 'bg-emerald-500 border-emerald-400 shadow-sm shadow-emerald-500/40';
+    return 'bg-[#10b981] border-emerald-300 shadow-md shadow-emerald-500/60';
   };
 
   const progressPercentage = Math.min(100, Math.round((focusedHours / focusGoal) * 100));
@@ -214,7 +303,7 @@ export default function Dashboard() {
       <div className="min-h-screen bg-[#0a0a0a] text-white flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
           <div className="w-10 h-10 border-4 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin"></div>
-          <span className="text-gray-400 text-sm">Loading your habit dashboard...</span>
+          <span className="text-gray-400 text-sm">Loading Consistency Board...</span>
         </div>
       </div>
     );
@@ -224,68 +313,103 @@ export default function Dashboard() {
     <div className="min-h-screen bg-[#0a0a0a] text-white flex flex-col selection:bg-emerald-500/30">
       <Navbar />
 
+      {/* Floating Toast Notification */}
+      {toastMessage && (
+        <div className="fixed bottom-6 right-6 z-50 px-5 py-3 rounded-2xl bg-emerald-600 text-white font-semibold text-sm shadow-2xl animate-bounce">
+          {toastMessage}
+        </div>
+      )}
+
       <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-8">
-        {/* Welcome Banner */}
+        {/* Welcome Header */}
         <div className="flex flex-col md:flex-row md:items-center justify-between pb-6 mb-8 border-b border-white/10 gap-4">
           <div>
             <h1 className="text-3xl font-extrabold text-white flex items-center gap-2">
-              Hello, {user?.username || 'Champion'}! 👋
+              Hello, {user?.username || 'Aditya'}! 👋
             </h1>
             <p className="text-gray-400 text-sm mt-1">
-              Track consistency, maintain your unbroken streak, and accomplish today&apos;s goals.
+              Consistency Board tracks every daily accomplishment. Click any block to log activity!
             </p>
           </div>
-          <button
-            onClick={() => setIsModalOpen(true)}
-            className="self-start md:self-auto px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 font-semibold text-sm shadow-lg shadow-emerald-500/25 transition-all flex items-center gap-2"
-          >
-            <span>+</span> Add Habit
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => handleDirectCheckIn(todayStr)}
+              className="px-5 py-2.5 rounded-xl bg-amber-500/20 border border-amber-500/40 hover:bg-amber-500/30 text-amber-300 font-semibold text-sm transition-all flex items-center gap-2"
+            >
+              <span>⚡</span> Quick Check-in
+            </button>
+            <button
+              onClick={() => setIsModalOpen(true)}
+              className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 font-semibold text-sm shadow-lg shadow-emerald-500/25 transition-all flex items-center gap-2"
+            >
+              <span>+</span> Add Habit
+            </button>
+          </div>
         </div>
 
         {/* 1. Consistency Board (Matching Image 1) */}
-        <section className="p-6 sm:p-8 rounded-3xl bg-[#121217] border border-white/10 shadow-xl mb-8 relative overflow-hidden">
-          <div className="flex items-center justify-between mb-6">
+        <section className="p-6 sm:p-8 rounded-3xl bg-[#121217] border border-white/10 shadow-2xl mb-8 relative overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between mb-6 gap-3">
             <div>
-              <h2 className="text-xl font-bold text-white flex items-center gap-2">
-                Consistency Board 📈
+              <h2 className="text-2xl font-black text-white flex items-center gap-2">
+                Consistency Board
               </h2>
-              <p className="text-xs text-gray-400 mt-0.5">
-                Activity heatmap showing daily habit completions
+              <p className="text-xs text-gray-400 mt-1">
+                Click any square to mark consistent or view daily activity
               </p>
             </div>
-            <span className="text-xs font-semibold px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              Active Streak: {todayCompleted.length > 0 ? 'Consistent 🔥' : 'Log Today'}
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-bold px-3.5 py-1.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                Streak: {currentStreak} Days 🔥
+              </span>
+            </div>
           </div>
 
-          {/* Heatmap Grid */}
+          {/* Consistency Heatmap Grid with Wed-Tue Weekday Labels */}
           <div className="overflow-x-auto pb-4">
-            <div className="min-w-[680px]">
-              {/* Day Labels & Grid Columns */}
-              <div className="grid grid-flow-col grid-rows-7 gap-1.5">
-                {heatmapGrid.map((day, idx) => (
-                  <div
-                    key={idx}
-                    title={`${day.date}: ${day.count} completed habit${day.count === 1 ? '' : 's'}`}
-                    className={`w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-[3px] border transition-transform hover:scale-125 cursor-pointer ${getColorClass(
-                      day.count
-                    )}`}
-                  />
+            <div className="min-w-[700px] flex gap-3">
+              {/* Day Labels Column on Left */}
+              <div className="flex flex-col justify-between py-0.5 text-[11px] font-semibold text-gray-400 pr-1 select-none">
+                {weekdayRows.map((row) => (
+                  <span key={row.label} className="h-4 leading-4 flex items-center">
+                    {row.label}
+                  </span>
                 ))}
               </div>
 
-              {/* Heatmap Legend */}
-              <div className="flex items-center justify-between text-xs text-gray-400 mt-4 px-1">
-                <span>Last 16 Weeks</span>
-                <div className="flex items-center gap-1.5">
-                  <span>Less</span>
-                  <div className="w-3.5 h-3.5 rounded-[3px] bg-[#1e1e24] border border-white/5" />
-                  <div className="w-3.5 h-3.5 rounded-[3px] bg-emerald-900" />
-                  <div className="w-3.5 h-3.5 rounded-[3px] bg-emerald-700" />
-                  <div className="w-3.5 h-3.5 rounded-[3px] bg-emerald-500" />
-                  <span>More</span>
-                </div>
+              {/* Grid of Squares: 7 rows x columnsCount */}
+              <div className="flex-1 flex flex-col justify-between gap-1.5">
+                {heatmapMatrix.map((rowCells, rIdx) => (
+                  <div key={rIdx} className="flex gap-1.5">
+                    {rowCells.map((cell, cIdx) => (
+                      <div
+                        key={cIdx}
+                        onClick={() => !cell.isFuture && handleDirectCheckIn(cell.date)}
+                        title={`${cell.date}: ${cell.count} completed log${cell.count === 1 ? '' : 's'}${cell.isToday ? ' (Today)' : ''}`}
+                        className={`w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-[4px] border transition-all cursor-pointer ${
+                          !cell.isFuture ? 'hover:scale-125 hover:z-10' : ''
+                        } ${getColorClass(cell.count, cell.isFuture, cell.isToday)}`}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Bottom Legend (Matching Image 1: Less [][][][][] More) */}
+            <div className="flex items-center justify-between text-xs text-gray-400 mt-6 pt-4 border-t border-white/5 px-2">
+              <span className="text-gray-400 text-xs">
+                💡 Tip: Click on today ({todayStr}) or any past square to toggle consistency
+              </span>
+              <div className="flex items-center gap-2">
+                <span>Less</span>
+                <div className="w-3.5 h-3.5 rounded-[3px] bg-[#1a1a20] border border-white/5" />
+                <div className="w-3.5 h-3.5 rounded-[3px] bg-emerald-900" />
+                <div className="w-3.5 h-3.5 rounded-[3px] bg-emerald-700" />
+                <div className="w-3.5 h-3.5 rounded-[3px] bg-emerald-500" />
+                <div className="w-3.5 h-3.5 rounded-[3px] bg-[#10b981]" />
+                <span>More</span>
               </div>
             </div>
           </div>
@@ -294,13 +418,13 @@ export default function Dashboard() {
         {/* 2. Today's Focused Hours & Quick Actions Row (Matching Image 1) */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
           {/* Card: Today's Focused Hours */}
-          <div className="p-6 rounded-3xl bg-[#121217] border border-white/10 shadow-lg flex flex-col justify-between">
+          <div className="p-6 sm:p-7 rounded-3xl bg-[#121217] border border-white/10 shadow-lg flex flex-col justify-between">
             <div>
-              <h3 className="text-lg font-bold text-white mb-1">Today&apos;s Focused Hours</h3>
-              <p className="text-xs text-gray-400 mb-4">Log deep study and work sessions</p>
+              <h3 className="text-xl font-bold text-white mb-1">Today&apos;s Focused Hours</h3>
+              <p className="text-xs text-gray-400 mb-5">Track focused study and deep work sessions</p>
 
-              <div className="text-2xl font-black text-white mb-3">
-                Today: <span className="text-emerald-400">{focusedHours}</span> hours
+              <div className="text-2xl sm:text-3xl font-black text-white mb-4">
+                Today: <span className="text-blue-400">{focusedHours}</span> hours
               </div>
 
               <form onSubmit={handleSaveFocusHours} className="flex gap-3 mb-6">
@@ -329,7 +453,7 @@ export default function Dashboard() {
               </div>
               <div className="w-full h-2.5 rounded-full bg-black/40 overflow-hidden border border-white/5">
                 <div
-                  className="h-full bg-gradient-to-r from-blue-500 to-emerald-400 rounded-full transition-all duration-500"
+                  className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full transition-all duration-500"
                   style={{ width: `${progressPercentage}%` }}
                 />
               </div>
@@ -337,10 +461,10 @@ export default function Dashboard() {
           </div>
 
           {/* Card: Quick Actions */}
-          <div className="p-6 rounded-3xl bg-[#121217] border border-white/10 shadow-lg flex flex-col justify-between">
+          <div className="p-6 sm:p-7 rounded-3xl bg-[#121217] border border-white/10 shadow-lg flex flex-col justify-between">
             <div>
-              <h3 className="text-lg font-bold text-white mb-1">Quick Actions</h3>
-              <p className="text-xs text-gray-400 mb-6">Fast shortcuts to supercharge your routine</p>
+              <h3 className="text-xl font-bold text-white mb-1">Quick Actions</h3>
+              <p className="text-xs text-gray-400 mb-5">Shortcuts to log habits, timer, or calendar</p>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -349,8 +473,8 @@ export default function Dashboard() {
                 className="p-4 rounded-2xl bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 text-blue-300 transition-all flex flex-col items-center justify-center text-center group"
               >
                 <span className="text-2xl mb-1 group-hover:scale-110 transition-transform">⏱️</span>
-                <span className="font-semibold text-sm text-white">+ New Session</span>
-                <span className="text-[11px] text-gray-400 mt-0.5">Focus countdown</span>
+                <span className="font-bold text-sm text-white">+ New Session</span>
+                <span className="text-[11px] text-gray-400 mt-0.5">Focus Countdown</span>
               </Link>
 
               <button
@@ -358,22 +482,22 @@ export default function Dashboard() {
                 className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 hover:bg-emerald-500/20 text-emerald-300 transition-all flex flex-col items-center justify-center text-center group"
               >
                 <span className="text-2xl mb-1 group-hover:scale-110 transition-transform">🎯</span>
-                <span className="font-semibold text-sm text-white">+ Add Habit</span>
-                <span className="text-[11px] text-gray-400 mt-0.5">Track daily task</span>
+                <span className="font-bold text-sm text-white">+ Add Habit</span>
+                <span className="text-[11px] text-gray-400 mt-0.5">New Daily Goal</span>
               </button>
 
-              <Link
-                href="/habits"
+              <button
+                onClick={() => handleDirectCheckIn(todayStr)}
                 className="col-span-2 p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/20 hover:bg-amber-500/20 text-amber-300 transition-all flex items-center justify-center gap-2 group"
               >
-                <span className="text-lg">📋</span>
-                <span className="font-semibold text-sm text-white">Manage All Habits & Schedule &rarr;</span>
-              </Link>
+                <span className="text-lg">📅</span>
+                <span className="font-bold text-sm text-white">+ Quick Calendar Check-in for Today</span>
+              </button>
             </div>
           </div>
         </div>
 
-        {/* 3. Today's Habits Check-off Checklist */}
+        {/* 3. Today's Habits Check-in Checklist */}
         <section className="p-6 sm:p-8 rounded-3xl bg-[#121217] border border-white/10 shadow-xl">
           <div className="flex items-center justify-between mb-6">
             <div>
@@ -381,29 +505,29 @@ export default function Dashboard() {
                 Today&apos;s Habits Check-In ✅
               </h2>
               <p className="text-xs text-gray-400 mt-0.5">
-                Check off habits you completed today to light up your Consistency Board
+                Check off habits completed today to illuminate your Consistency Board
               </p>
             </div>
             <Link
               href="/habits"
               className="text-xs font-semibold text-blue-400 hover:text-blue-300 transition-colors"
             >
-              View All ({habits.length}) &rarr;
+              Manage All Habits ({habits.length}) &rarr;
             </Link>
           </div>
 
           {habits.length === 0 ? (
             <div className="text-center py-12 px-4 rounded-2xl bg-black/20 border border-white/5 border-dashed">
               <span className="text-4xl mb-3 block">🌱</span>
-              <p className="text-gray-300 font-medium mb-1">No habits created yet</p>
+              <p className="text-gray-300 font-medium mb-1">No custom habits added yet</p>
               <p className="text-gray-500 text-xs mb-4">
-                Start by creating your first daily habit like Reading, Workout, or Coding!
+                Click Quick Check-in above or Add Habit to start tracking your streak!
               </p>
               <button
                 onClick={() => setIsModalOpen(true)}
-                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md transition-all"
+                className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md transition-all"
               >
-                + Create First Habit
+                + Add Habit
               </button>
             </div>
           ) : (
@@ -416,7 +540,7 @@ export default function Dashboard() {
                     onClick={() => handleToggleHabit(habit.id)}
                     className={`p-4 rounded-2xl border transition-all cursor-pointer flex items-center justify-between group ${
                       isCompleted
-                        ? 'bg-emerald-950/20 border-emerald-500/40 text-white'
+                        ? 'bg-emerald-950/25 border-emerald-500/50 text-white shadow-sm'
                         : 'bg-white/[0.02] border-white/10 hover:border-white/20 text-gray-300'
                     }`}
                   >
@@ -444,8 +568,8 @@ export default function Dashboard() {
                     <div
                       className={`w-8 h-8 rounded-xl flex items-center justify-center font-bold text-sm transition-all ${
                         isCompleted
-                          ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/30 scale-105'
-                          : 'bg-white/5 border border-white/20 text-transparent group-hover:border-emerald-500 group-hover:text-emerald-500/40'
+                          ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/40 scale-105'
+                          : 'bg-white/5 border border-white/20 text-transparent group-hover:border-emerald-500 group-hover:text-emerald-500/50'
                       }`}
                     >
                       ✓
@@ -469,7 +593,7 @@ export default function Dashboard() {
               ✕
             </button>
             <h3 className="text-xl font-bold text-white mb-1">Create New Habit 🎯</h3>
-            <p className="text-xs text-gray-400 mb-6">Add a consistent routine to your tracker</p>
+            <p className="text-xs text-gray-400 mb-6">Add a recurring daily habit to your consistency tracker</p>
 
             <form onSubmit={handleCreateHabit} className="space-y-4">
               <div>

@@ -6,6 +6,7 @@ const {
   updateHabit, 
   deleteHabit, 
   toggleHabit, 
+  quickCheckIn, 
   getConsistencyBoard 
 } = require('../controllers/habitController');
 const verifyToken = require('../middleware/authMiddleware');
@@ -15,6 +16,7 @@ router.use(verifyToken);
 
 // Consistency board & logs
 router.get('/board', getConsistencyBoard);
+router.post('/checkin', quickCheckIn);
 
 // Habit CRUD
 router.post('/', createHabit);
