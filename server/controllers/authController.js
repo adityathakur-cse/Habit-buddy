@@ -93,7 +93,100 @@ const loginUser = async (req, res) => {
   }
 };
 
+// Get current user profile and stats
+const getProfile = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userResult = await db.query(
+      'SELECT id, username, email, created_at FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const habitsCount = await db.query(
+      'SELECT COUNT(*) as count FROM habits WHERE user_id = $1',
+      [userId]
+    );
+
+    const focusHours = await db.query(
+      'SELECT COALESCE(SUM(duration_minutes), 0) as total_minutes FROM focus_sessions WHERE user_id = $1',
+      [userId]
+    );
+
+    const logsCount = await db.query(
+      'SELECT COUNT(*) as count FROM daily_logs WHERE user_id = $1 AND status = $2',
+      [userId, 'completed']
+    );
+
+    res.json({
+      user: userResult.rows[0],
+      stats: {
+        totalHabits: parseInt(habitsCount.rows[0].count, 10),
+        totalCompletedDays: parseInt(logsCount.rows[0].count, 10),
+        totalFocusMinutes: parseInt(focusHours.rows[0].total_minutes, 10),
+        totalFocusHours: (parseInt(focusHours.rows[0].total_minutes, 10) / 60).toFixed(1),
+      }
+    });
+  } catch (error) {
+    console.error('Get Profile Error:', error.message);
+    res.status(500).json({ error: 'Server error while fetching profile' });
+  }
+};
+
+// Update profile info
+const updateProfile = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { username, email } = req.body;
+
+    if (!username || !email) {
+      return res.status(400).json({ error: 'Username and email are required' });
+    }
+
+    // Check conflict
+    const conflict = await db.query(
+      'SELECT id FROM users WHERE (email = $1 OR username = $2) AND id != $3',
+      [email, username, userId]
+    );
+
+    if (conflict.rows.length > 0) {
+      return res.status(400).json({ error: 'Username or email already in use by another account' });
+    }
+
+    const result = await db.query(
+      'UPDATE users SET username = $1, email = $2 WHERE id = $3 RETURNING id, username, email, created_at',
+      [username, email, userId]
+    );
+
+    res.json({
+      message: 'Profile updated successfully',
+      user: result.rows[0],
+    });
+  } catch (error) {
+    console.error('Update Profile Error:', error.message);
+    res.status(500).json({ error: 'Server error while updating profile' });
+  }
+};
+
+// Delete account
+const deleteAccount = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    await db.query('DELETE FROM users WHERE id = $1', [userId]);
+    res.json({ message: 'Account deleted successfully' });
+  } catch (error) {
+    console.error('Delete Account Error:', error.message);
+    res.status(500).json({ error: 'Server error while deleting account' });
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
+  getProfile,
+  updateProfile,
+  deleteAccount,
 };

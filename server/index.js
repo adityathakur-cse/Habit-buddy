@@ -11,9 +11,13 @@ app.use(express.json());
 // Routes
 const authRoutes = require('./routes/authRoutes');
 const habitRoutes = require('./routes/habitRoutes');
+const sessionRoutes = require('./routes/sessionRoutes');
+const reviewRoutes = require('./routes/reviewRoutes');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/habits', habitRoutes);
+app.use('/api/sessions', sessionRoutes);
+app.use('/api/reviews', reviewRoutes);
 
 // Basic Route
 app.get('/api', (req, res) => {

@@ -1,26 +1,28 @@
 const express = require('express');
 const router = express.Router();
-const { registerUser, loginUser } = require('../controllers/authController');
+const { 
+  registerUser, 
+  loginUser, 
+  getProfile, 
+  updateProfile, 
+  deleteAccount 
+} = require('../controllers/authController');
 const verifyToken = require('../middleware/authMiddleware');
 
-// @route   POST /api/auth/register
-// @desc    Register a new user
-// @access  Public
+// Public routes
 router.post('/register', registerUser);
-
-// @route   POST /api/auth/login
-// @desc    Login user & return JWT token
-// @access  Public
 router.post('/login', loginUser);
 
-// @route   GET /api/auth/me
-// @desc    Get current logged in user details
-// @access  Private
+// Private profile routes
 router.get('/me', verifyToken, (req, res) => {
   res.json({
     message: 'Token is valid',
     user: req.user,
   });
 });
+router.get('/profile', verifyToken, getProfile);
+router.put('/profile', verifyToken, updateProfile);
+router.delete('/profile', verifyToken, deleteAccount);
 
 module.exports = router;
+
